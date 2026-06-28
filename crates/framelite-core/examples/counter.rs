@@ -1,28 +1,46 @@
 //! Minimal framelite app: `cargo run -p framelite-core --example counter`
 //!
-//! Shows the whole core working together — a bus, an undoable document, and two modules
-//! that never reference each other, only the channels `tick` / `count` / `control`.
+//! Shows the whole core working together — typed bus messages, an action+reducer document,
+//! and two modules that never reference each other, only the channels `tick` / `count`.
+//! Shutdown is first-class: `main` flips the runtime's signal, modules observe it.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use framelite_bus::LocalBus;
 use framelite_core::{Module, ModuleCtx, Runtime};
-use framelite_document::{Command, Doc};
+use framelite_document::Doc;
 use framelite_protocol::{Channel, ModuleId};
+use serde::{Deserialize, Serialize};
 
-/// The one edit our document supports.
-struct Add(i64);
-impl Command<i64> for Add {
-    fn name(&self) -> &str {
-        "add"
-    }
-    fn apply(&self, state: &mut i64) -> Result<(), String> {
-        *state += self.0;
-        Ok(())
+/// Typed message on the `tick` channel.
+#[derive(Serialize, Deserialize)]
+struct Tick {
+    amount: i64,
+}
+
+/// Typed message on the `count` channel.
+#[derive(Serialize, Deserialize)]
+struct Count {
+    value: i64,
+}
+
+/// The document's actions — plain serializable data, not trait objects.
+#[derive(Serialize, Deserialize)]
+enum CounterAction {
+    Add(i64),
+}
+
+fn reduce(state: &mut i64, action: &CounterAction) -> Result<(), String> {
+    match action {
+        CounterAction::Add(n) => {
+            *state += n;
+            Ok(())
+        }
     }
 }
 
-/// Pure producer: emit a handful of increments, then ask everyone to shut down.
+/// Pure producer: emit a handful of increments.
 struct Ticker;
 impl Module for Ticker {
     fn id(&self) -> ModuleId {
@@ -30,35 +48,36 @@ impl Module for Ticker {
     }
     fn run(self: Box<Self>, ctx: ModuleCtx) {
         for _ in 0..5 {
-            ctx.publish("tick", serde_json::json!({ "amount": 1 })).unwrap();
+            ctx.publish_msg("tick", &Tick { amount: 1 }).unwrap();
         }
-        ctx.publish("control", serde_json::json!({ "shutdown": true }))
-            .unwrap();
     }
 }
 
-/// Owns the document; turns ticks into commands and republishes the running total.
+/// Owns the document; turns ticks into actions and republishes the running total.
 struct Store {
-    doc: Doc<i64>,
+    doc: Doc<i64, CounterAction>,
 }
 impl Module for Store {
     fn id(&self) -> ModuleId {
         ModuleId::new("store")
     }
     fn subscriptions(&self) -> Vec<Channel> {
-        vec![Channel::new("tick"), Channel::new("control")]
+        vec![Channel::new("tick")]
     }
     fn run(mut self: Box<Self>, ctx: ModuleCtx) {
-        while let Ok(env) = ctx.recv() {
-            match env.channel.0.as_str() {
-                "tick" => {
-                    let amount = env.payload["amount"].as_i64().unwrap_or(0);
-                    self.doc.dispatch(&Add(amount)).unwrap();
-                    let total = *self.doc.state();
-                    ctx.publish("count", serde_json::json!({ "value": total })).unwrap();
+        while !ctx.should_stop() {
+            match ctx.recv_timeout(Duration::from_millis(50)) {
+                Ok(Some(env)) => {
+                    let tick: Tick = match env.decode() {
+                        Ok(t) => t,
+                        Err(_) => continue,
+                    };
+                    self.doc.dispatch(&CounterAction::Add(tick.amount)).unwrap();
+                    ctx.publish_msg("count", &Count { value: *self.doc.state() })
+                        .unwrap();
                 }
-                "control" if env.payload["shutdown"].as_bool() == Some(true) => break,
-                _ => {}
+                Ok(None) => {}      // timeout → re-check should_stop
+                Err(_) => break,    // bus closed
             }
         }
     }
@@ -71,14 +90,16 @@ fn main() {
 
     let counts = bus.subscribe("count");
 
-    rt.spawn(Store { doc: Doc::new(0) });
+    rt.spawn(Store { doc: Doc::new(0, reduce) });
     rt.spawn(Ticker);
 
     for _ in 0..5 {
         let env = counts.recv().unwrap();
-        println!("count = {}", env.payload["value"]);
+        let count: Count = env.decode().unwrap();
+        println!("count = {}", count.value);
     }
 
-    rt.join();
-    println!("done.");
+    rt.shutdown();
+    let report = rt.join();
+    println!("done (clean: {}).", report.is_clean());
 }

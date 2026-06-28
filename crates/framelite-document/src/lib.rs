@@ -1,23 +1,19 @@
-//! # framelite-document — a generic undoable document
+//! # framelite-document — a generic undoable document (action + reducer)
 //!
-//! [`Doc<S>`] is the single source of truth for an app's state `S`. State changes go
-//! through [`Command<S>`] values, which makes every mutation **named, fallible, and
-//! undoable**: a command is applied to a *clone* first, so if it returns `Err` the live
-//! state is untouched; on success the previous state is pushed onto an undo stack.
+//! [`Doc<S, A>`] is the single source of truth for an app's state `S`. State changes are
+//! described by **actions** `A` — plain, serializable values — and applied by a single
+//! **reducer** `Fn(&mut S, &A) -> Result<(), String>`. Making mutations *data* (not trait
+//! objects) is the robustness win: an action can be logged, replayed, persisted, or sent
+//! across the bus, and the same action stream always reproduces the same state.
 //!
-//! The crate is domain-free on purpose — the app brings the state type and the commands.
-//! That is what keeps the core reusable: a counter, a document tree, a scene graph all use
-//! the same `Doc` / `History` machinery.
+//! Every dispatch is **transactional and undoable**: the reducer runs against a *clone*, so
+//! a rejected action (`Err`) leaves the live state untouched; a successful one pushes the
+//! previous state onto an undo stack.
+//!
+//! The crate is domain-free on purpose — the app brings the state type, the action enum, and
+//! the reducer. A counter, a tree, a scene graph all reuse the same machinery.
 
 use serde::{Deserialize, Serialize};
-
-/// A named, fallible mutation of state `S`. Implemented by the app for each edit.
-pub trait Command<S> {
-    /// Human / log name of the command.
-    fn name(&self) -> &str;
-    /// Apply the change. Return `Err(msg)` to reject it — the document stays unchanged.
-    fn apply(&self, state: &mut S) -> Result<(), String>;
-}
 
 /// Generic undo/redo history for any cloneable state `S`. Holds the present value plus
 /// bounded past/future stacks.
@@ -83,26 +79,38 @@ impl<S: Clone> History<S> {
     }
 }
 
-/// The application document: state `S` behind an undo/redo [`History`], mutated only by
-/// dispatching [`Command<S>`]s.
-#[derive(Clone, Debug)]
-pub struct Doc<S> {
-    history: History<S>,
-}
+/// A reducer applied to state `S` by an action `A`. Returns `Err(msg)` to reject the
+/// action — the document then stays unchanged.
+pub type ReduceFn<S, A> = dyn Fn(&mut S, &A) -> Result<(), String> + Send + Sync;
 
 /// Default undo depth when none is given.
 pub const DEFAULT_MAX_DEPTH: usize = 100;
 
-impl<S: Clone> Doc<S> {
-    /// New document with the default undo depth.
-    pub fn new(initial: S) -> Self {
-        Self::with_depth(initial, DEFAULT_MAX_DEPTH)
+/// The application document: state `S` behind an undo/redo [`History`], mutated only by
+/// dispatching serializable actions `A` through a fixed reducer.
+pub struct Doc<S, A> {
+    history: History<S>,
+    reducer: Box<ReduceFn<S, A>>,
+}
+
+impl<S: Clone, A> Doc<S, A> {
+    /// New document with the default undo depth and the given reducer.
+    pub fn new(
+        initial: S,
+        reducer: impl Fn(&mut S, &A) -> Result<(), String> + Send + Sync + 'static,
+    ) -> Self {
+        Self::with_depth(initial, DEFAULT_MAX_DEPTH, reducer)
     }
 
     /// New document with an explicit undo depth.
-    pub fn with_depth(initial: S, max_depth: usize) -> Self {
+    pub fn with_depth(
+        initial: S,
+        max_depth: usize,
+        reducer: impl Fn(&mut S, &A) -> Result<(), String> + Send + Sync + 'static,
+    ) -> Self {
         Self {
             history: History::new(initial, max_depth),
+            reducer: Box::new(reducer),
         }
     }
 
@@ -111,11 +119,12 @@ impl<S: Clone> Doc<S> {
         self.history.present()
     }
 
-    /// Apply a command transactionally: it runs against a clone, and only a successful
-    /// result is committed to history. A rejected command leaves the document untouched.
-    pub fn dispatch<C: Command<S>>(&mut self, cmd: &C) -> Result<(), String> {
+    /// Apply an action transactionally: the reducer runs against a clone, and only a
+    /// successful result is committed to history. A rejected action leaves the document
+    /// untouched.
+    pub fn dispatch(&mut self, action: &A) -> Result<(), String> {
         let mut next = self.history.present().clone();
-        cmd.apply(&mut next)?;
+        (self.reducer)(&mut next, action)?;
         self.history.commit(next);
         Ok(())
     }
@@ -137,11 +146,11 @@ impl<S: Clone> Doc<S> {
     }
 }
 
-/// The undo/redo verbs, as a serializable value an app can route over the bus and turn
-/// into [`Doc::undo`] / [`Doc::redo`] calls.
+/// The undo/redo verbs as a serializable action an app can route over the bus and turn into
+/// [`Doc::undo`] / [`Doc::redo`] calls.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum BuiltInCommand {
+pub enum HistoryAction {
     Undo,
     Redo,
 }
@@ -149,63 +158,88 @@ pub enum BuiltInCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::{Deserialize, Serialize};
 
-    struct Add(i64);
-    impl Command<i64> for Add {
-        fn name(&self) -> &str {
-            "add"
-        }
-        fn apply(&self, state: &mut i64) -> Result<(), String> {
-            *state += self.0;
-            Ok(())
+    #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+    enum CounterAction {
+        Add(i64),
+        /// Rejected when it would take the counter negative.
+        Sub(i64),
+    }
+
+    fn reduce(state: &mut i64, action: &CounterAction) -> Result<(), String> {
+        match action {
+            CounterAction::Add(n) => {
+                *state += n;
+                Ok(())
+            }
+            CounterAction::Sub(n) => {
+                if *state - n < 0 {
+                    return Err("would go negative".into());
+                }
+                *state -= n;
+                Ok(())
+            }
         }
     }
 
-    struct MustBePositive(i64);
-    impl Command<i64> for MustBePositive {
-        fn name(&self) -> &str {
-            "must-be-positive"
-        }
-        fn apply(&self, state: &mut i64) -> Result<(), String> {
-            let next = *state + self.0;
-            if next < 0 {
-                return Err("would go negative".into());
-            }
-            *state = next;
-            Ok(())
-        }
+    fn doc() -> Doc<i64, CounterAction> {
+        Doc::new(0, reduce)
     }
 
     #[test]
     fn dispatch_then_undo_redo() {
-        let mut doc = Doc::new(0i64);
-        doc.dispatch(&Add(5)).unwrap();
-        doc.dispatch(&Add(3)).unwrap();
-        assert_eq!(*doc.state(), 8);
+        let mut d = doc();
+        d.dispatch(&CounterAction::Add(5)).unwrap();
+        d.dispatch(&CounterAction::Add(3)).unwrap();
+        assert_eq!(*d.state(), 8);
 
-        assert!(doc.undo());
-        assert_eq!(*doc.state(), 5);
-        assert!(doc.redo());
-        assert_eq!(*doc.state(), 8);
+        assert!(d.undo());
+        assert_eq!(*d.state(), 5);
+        assert!(d.redo());
+        assert_eq!(*d.state(), 8);
     }
 
     #[test]
-    fn rejected_command_leaves_state_and_history_untouched() {
-        let mut doc = Doc::new(2i64);
-        let err = doc.dispatch(&MustBePositive(-10)).unwrap_err();
+    fn rejected_action_leaves_state_and_history_untouched() {
+        let mut d = doc();
+        d.dispatch(&CounterAction::Add(2)).unwrap();
+        let err = d.dispatch(&CounterAction::Sub(10)).unwrap_err();
         assert_eq!(err, "would go negative");
-        assert_eq!(*doc.state(), 2);
-        assert!(!doc.can_undo());
+        assert_eq!(*d.state(), 2);
+        // Only the successful Add is on the undo stack.
+        assert!(d.undo());
+        assert_eq!(*d.state(), 0);
+        assert!(!d.can_undo());
     }
 
     #[test]
     fn new_dispatch_clears_redo() {
-        let mut doc = Doc::new(0i64);
-        doc.dispatch(&Add(1)).unwrap();
-        doc.undo();
-        assert!(doc.can_redo());
-        doc.dispatch(&Add(9)).unwrap();
-        assert!(!doc.can_redo());
-        assert_eq!(*doc.state(), 9);
+        let mut d = doc();
+        d.dispatch(&CounterAction::Add(1)).unwrap();
+        d.undo();
+        assert!(d.can_redo());
+        d.dispatch(&CounterAction::Add(9)).unwrap();
+        assert!(!d.can_redo());
+        assert_eq!(*d.state(), 9);
+    }
+
+    #[test]
+    fn actions_are_data_replaying_reproduces_state() {
+        // The whole point of action+reducer: a recorded action log replays to the same state.
+        let log = vec![
+            CounterAction::Add(10),
+            CounterAction::Sub(4),
+            CounterAction::Add(1),
+        ];
+        // Round-trip the log through JSON to prove actions are serializable data.
+        let json = serde_json::to_string(&log).unwrap();
+        let replayed: Vec<CounterAction> = serde_json::from_str(&json).unwrap();
+
+        let mut d = doc();
+        for a in &replayed {
+            d.dispatch(a).unwrap();
+        }
+        assert_eq!(*d.state(), 7);
     }
 }

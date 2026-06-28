@@ -11,20 +11,32 @@
 //! wants; a publisher names the channel it emits on. The broker fans each [`Envelope`] out
 //! to every subscriber of its channel.
 //!
+//! ## Backpressure (bounded, non-blocking)
+//! Each subscriber inbox is a **bounded** queue (default [`DEFAULT_CAPACITY`]). Publishing
+//! never blocks the broker on a slow consumer: if a subscriber's inbox is full the envelope
+//! is **dropped for that subscriber** and counted in [`LocalBus::dropped`]. This trades the
+//! unbounded-memory risk for an explicit, observable loss under overload — never a silent
+//! stall. Size the inbox with [`LocalBus::subscribe_with_capacity`] when a consumer must not
+//! miss events.
+//!
 //! ## Retained channels (the generic "replay state")
 //! A channel marked stateful with [`LocalBus::retain`] keeps its **last** envelope and
 //! replays it to any *new* subscriber, so a module that joins late immediately learns the
 //! current value (like a count). Unmarked channels are transient events — nothing is
-//! replayed, so a one-shot (a tick, a shutdown) never spuriously re-fires.
+//! replayed, so a one-shot (a tick) never spuriously re-fires.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 pub use framelite_protocol::{Channel, Envelope, ModuleId};
 
 /// Bus error as a message — matches the project's lightweight error style.
 pub type BusError = String;
+
+/// Default bounded inbox depth per subscriber.
+pub const DEFAULT_CAPACITY: usize = 1024;
 
 /// Publishes envelopes onto the bus. `Send + Sync` so it can be shared across threads.
 pub trait Sender: Send + Sync {
@@ -37,20 +49,25 @@ pub trait Receiver: Send {
     fn recv(&self) -> Result<Envelope, BusError>;
     /// Non-blocking poll: `Ok(None)` when nothing is ready.
     fn try_recv(&self) -> Result<Option<Envelope>, BusError>;
+    /// Block for at most `timeout`. `Ok(None)` on timeout — lets a module's loop wake
+    /// periodically to check a shutdown flag without a busy spin.
+    fn recv_timeout(&self, timeout: Duration) -> Result<Option<Envelope>, BusError>;
 }
 
 // --- the in-process broker -----------------------------------------------------
 
 struct Inner {
     /// channel name → the live subscriber inboxes on it.
-    subs: HashMap<Channel, Vec<mpsc::Sender<Envelope>>>,
+    subs: HashMap<Channel, Vec<mpsc::SyncSender<Envelope>>>,
     /// channel name → its last envelope, for channels marked stateful.
     retained: HashMap<Channel, Envelope>,
     /// channels whose last value is kept and replayed to new subscribers.
-    stateful: std::collections::HashSet<Channel>,
+    stateful: HashSet<Channel>,
+    /// total envelopes dropped because a subscriber inbox was full (observability).
+    dropped: u64,
 }
 
-/// In-process pub/sub broker. Cheap to clone behind an `Arc`; all methods take `&self`.
+/// In-process pub/sub broker. Cheap to share behind an `Arc`; all methods take `&self`.
 pub struct LocalBus {
     inner: Mutex<Inner>,
 }
@@ -67,7 +84,8 @@ impl LocalBus {
             inner: Mutex::new(Inner {
                 subs: HashMap::new(),
                 retained: HashMap::new(),
-                stateful: std::collections::HashSet::new(),
+                stateful: HashSet::new(),
+                dropped: 0,
             }),
         }
     }
@@ -78,39 +96,81 @@ impl LocalBus {
         self.inner.lock().unwrap().stateful.insert(channel.into());
     }
 
-    /// Publish an envelope to every current subscriber of its channel. On a stateful channel
-    /// the envelope also becomes the retained value handed to future subscribers.
+    /// Total number of envelopes dropped so far due to full subscriber inboxes.
+    pub fn dropped(&self) -> u64 {
+        self.inner.lock().unwrap().dropped
+    }
+
+    /// Publish an envelope to every current subscriber of its channel. Never blocks: a
+    /// subscriber whose inbox is full has this envelope dropped (and counted); a subscriber
+    /// whose receiver is gone is pruned. On a stateful channel the envelope also becomes the
+    /// retained value handed to future subscribers.
     pub fn publish(&self, env: Envelope) -> Result<(), BusError> {
         let mut inner = self.inner.lock().map_err(|e| e.to_string())?;
         let channel = env.channel.clone();
         if inner.stateful.contains(&channel) {
             inner.retained.insert(channel.clone(), env.clone());
         }
-        if let Some(list) = inner.subs.get_mut(&channel) {
-            // Deliver, dropping any subscriber whose receiver has gone away.
-            list.retain(|tx| tx.send(env.clone()).is_ok());
-        }
+        let dropped = if let Some(list) = inner.subs.get_mut(&channel) {
+            let mut d = 0u64;
+            let mut i = 0;
+            while i < list.len() {
+                match list[i].try_send(env.clone()) {
+                    Ok(()) => i += 1,
+                    // Full: drop for this subscriber, keep it subscribed.
+                    Err(mpsc::TrySendError::Full(_)) => {
+                        d += 1;
+                        i += 1;
+                    }
+                    // Receiver gone: prune (swap_remove is fine, order across subs is unspecified).
+                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                        list.swap_remove(i);
+                    }
+                }
+            }
+            d
+        } else {
+            0
+        };
+        inner.dropped += dropped;
         Ok(())
     }
 
-    /// Subscribe to a single channel.
+    /// Subscribe to a single channel with the default inbox depth.
     pub fn subscribe(&self, channel: impl Into<Channel>) -> Box<dyn Receiver> {
         self.subscribe_many([channel.into()])
     }
 
+    /// Subscribe to a single channel with an explicit inbox depth — raise it for a consumer
+    /// that must not drop events under bursts.
+    pub fn subscribe_with_capacity(
+        &self,
+        channel: impl Into<Channel>,
+        capacity: usize,
+    ) -> Box<dyn Receiver> {
+        self.subscribe_inner([channel.into()], capacity)
+    }
+
     /// Subscribe to several channels through **one** merged inbox: envelopes from any of the
-    /// named channels arrive on the same receiver, in send order. A retained value on any of
-    /// them is delivered immediately, newest-marked first is not guaranteed across channels.
+    /// named channels arrive on the same receiver, in send order.
     pub fn subscribe_many(
         &self,
         channels: impl IntoIterator<Item = Channel>,
     ) -> Box<dyn Receiver> {
-        let (tx, rx) = mpsc::channel();
+        self.subscribe_inner(channels, DEFAULT_CAPACITY)
+    }
+
+    fn subscribe_inner(
+        &self,
+        channels: impl IntoIterator<Item = Channel>,
+        capacity: usize,
+    ) -> Box<dyn Receiver> {
+        let (tx, rx) = mpsc::sync_channel(capacity);
         let mut inner = self.inner.lock().unwrap();
         for channel in channels {
             // Hand the joiner the current value of a stateful channel right away.
             if let Some(env) = inner.retained.get(&channel).cloned() {
-                let _ = tx.send(env);
+                let _ = tx.try_send(env);
             }
             inner.subs.entry(channel).or_default().push(tx.clone());
         }
@@ -138,6 +198,13 @@ impl Receiver for ChannelReceiver {
             Err(mpsc::TryRecvError::Disconnected) => Err("bus disconnected".into()),
         }
     }
+    fn recv_timeout(&self, timeout: Duration) -> Result<Option<Envelope>, BusError> {
+        match self.0.recv_timeout(timeout) {
+            Ok(env) => Ok(Some(env)),
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err("bus disconnected".into()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -159,7 +226,6 @@ mod tests {
         let got = tick.recv().unwrap();
         assert_eq!(got.channel, Channel::new("tick"));
         assert_eq!(got.payload["n"], 1);
-        // Nothing else queued.
         assert!(tick.try_recv().unwrap().is_none());
     }
 
@@ -170,7 +236,6 @@ mod tests {
         bus.publish(env("store", "count", 41)).unwrap();
         bus.publish(env("store", "count", 42)).unwrap();
 
-        // Subscribed *after* the publishes — still sees the latest, exactly once.
         let late = bus.subscribe("count");
         let got = late.recv().unwrap();
         assert_eq!(got.payload["n"], 42);
@@ -204,7 +269,31 @@ mod tests {
         let bus = LocalBus::new();
         let rx = bus.subscribe("tick");
         drop(rx);
-        // Should not error even though the only subscriber is gone.
         bus.publish(env("a", "tick", 1)).unwrap();
+    }
+
+    #[test]
+    fn full_inbox_drops_and_counts_without_blocking() {
+        let bus = LocalBus::new();
+        // Capacity 2, never drained: the 3rd+ publishes are dropped, not blocked.
+        let rx = bus.subscribe_with_capacity("tick", 2);
+        for i in 0..5 {
+            bus.publish(env("a", "tick", i)).unwrap();
+        }
+        assert_eq!(bus.dropped(), 3);
+        // The two that fit are still there.
+        assert!(rx.recv().unwrap().payload["n"].is_number());
+        assert!(rx.recv().unwrap().payload["n"].is_number());
+        assert!(rx.try_recv().unwrap().is_none());
+    }
+
+    #[test]
+    fn recv_timeout_returns_none_then_value() {
+        let bus = LocalBus::new();
+        let rx = bus.subscribe("tick");
+        assert!(rx.recv_timeout(Duration::from_millis(10)).unwrap().is_none());
+        bus.publish(env("a", "tick", 7)).unwrap();
+        let got = rx.recv_timeout(Duration::from_millis(10)).unwrap().unwrap();
+        assert_eq!(got.payload["n"], 7);
     }
 }

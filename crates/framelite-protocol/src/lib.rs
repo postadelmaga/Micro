@@ -11,6 +11,7 @@
 //! enum: framelite is the generic core, so an app declares whatever channels it needs
 //! (`"tick"`, `"count"`, `"control"`, …) without editing this crate.
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// Identifies a module (a message's sender) on the bus.
@@ -89,6 +90,24 @@ impl Envelope {
             payload,
         }
     }
+
+    /// Build an envelope by serializing a **typed** message into the JSON payload. This is
+    /// the typed seam over the generic bus: producers send a real Rust type instead of
+    /// hand-built JSON, so a field rename is a compile error, not a silent `null`.
+    pub fn encode(
+        from: ModuleId,
+        channel: impl Into<Channel>,
+        msg: &impl Serialize,
+    ) -> Result<Self, String> {
+        let payload = serde_json::to_value(msg).map_err(|e| e.to_string())?;
+        Ok(Self::new(from, channel, payload))
+    }
+
+    /// Deserialize the payload into a typed message `T`. The receiver names the type it
+    /// expects (`env.decode::<Tick>()`) instead of indexing into a `serde_json::Value`.
+    pub fn decode<T: DeserializeOwned>(&self) -> Result<T, String> {
+        serde_json::from_value(self.payload.clone()).map_err(|e| e.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -113,5 +132,24 @@ mod tests {
         assert_eq!(back.from, ModuleId::new("ticker"));
         assert_eq!(back.channel, Channel::new("tick"));
         assert_eq!(back.payload, serde_json::json!({ "n": 1 }));
+    }
+
+    #[test]
+    fn encode_decode_round_trips_a_typed_message() {
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct Tick {
+            amount: i64,
+        }
+        let env = Envelope::encode(ModuleId::new("ticker"), "tick", &Tick { amount: 3 }).unwrap();
+        let back: Tick = env.decode().unwrap();
+        assert_eq!(back, Tick { amount: 3 });
+
+        // Wrong shape surfaces as an error, not a silent default.
+        #[derive(Deserialize)]
+        struct Other {
+            #[allow(dead_code)]
+            name: String,
+        }
+        assert!(env.decode::<Other>().is_err());
     }
 }
