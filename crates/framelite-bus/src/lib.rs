@@ -11,13 +11,20 @@
 //! wants; a publisher names the channel it emits on. The broker fans each [`Envelope`] out
 //! to every subscriber of its channel.
 //!
-//! ## Backpressure (bounded, non-blocking)
-//! Each subscriber inbox is a **bounded** queue (default [`DEFAULT_CAPACITY`]). Publishing
-//! never blocks the broker on a slow consumer: if a subscriber's inbox is full the envelope
-//! is **dropped for that subscriber** and counted in [`LocalBus::dropped`]. This trades the
-//! unbounded-memory risk for an explicit, observable loss under overload — never a silent
-//! stall. Size the inbox with [`LocalBus::subscribe_with_capacity`] when a consumer must not
-//! miss events.
+//! ## Backpressure (bounded; per-channel overflow policy)
+//! Each subscriber inbox is a **bounded** queue (default [`DEFAULT_CAPACITY`]). What happens
+//! when an inbox fills is a **per-channel** choice, set with [`LocalBus::set_overflow`]:
+//!
+//! * [`Overflow::Drop`] (the default) — real-time-friendly: publishing never blocks the
+//!   broker on a slow consumer. A full inbox has the envelope **dropped for that subscriber**
+//!   and counted in [`LocalBus::dropped`]. This trades the unbounded-memory risk for an
+//!   explicit, observable loss under overload — never a silent stall.
+//! * [`Overflow::Block`] — true (source-slowing) backpressure: a full inbox makes the
+//!   publisher **block** until space frees up, so a fast producer is paced by its slowest
+//!   consumer and nothing is lost ([`LocalBus::dropped`] stays untouched for these channels).
+//!
+//! Size the inbox with [`LocalBus::subscribe_with_capacity`] when a consumer must not miss
+//! events; reach for `Block` when correctness beats latency.
 //!
 //! ## Retained channels (the generic "replay state")
 //! A channel marked stateful with [`LocalBus::retain`] keeps its **last** envelope and
@@ -37,6 +44,18 @@ pub type BusError = String;
 
 /// Default bounded inbox depth per subscriber.
 pub const DEFAULT_CAPACITY: usize = 1024;
+
+/// What [`LocalBus::publish`] does when a subscriber's bounded inbox is full.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Overflow {
+    /// Drop the envelope for that subscriber and count it in [`LocalBus::dropped`]. Never
+    /// blocks — the default, so a slow consumer can never stall the producer.
+    #[default]
+    Drop,
+    /// Block the publisher until the inbox has room. True backpressure: nothing is dropped,
+    /// the producer is paced by the consumer. Never counted in [`LocalBus::dropped`].
+    Block,
+}
 
 /// Publishes envelopes onto the bus. `Send + Sync` so it can be shared across threads.
 pub trait Sender: Send + Sync {
@@ -63,6 +82,8 @@ struct Inner {
     retained: HashMap<Channel, Envelope>,
     /// channels whose last value is kept and replayed to new subscribers.
     stateful: HashSet<Channel>,
+    /// channel name → its overflow policy. Absent ⇒ [`Overflow::Drop`] (the default).
+    overflow: HashMap<Channel, Overflow>,
     /// total envelopes dropped because a subscriber inbox was full (observability).
     dropped: u64,
 }
@@ -85,6 +106,7 @@ impl LocalBus {
                 subs: HashMap::new(),
                 retained: HashMap::new(),
                 stateful: HashSet::new(),
+                overflow: HashMap::new(),
                 dropped: 0,
             }),
         }
@@ -96,43 +118,73 @@ impl LocalBus {
         self.inner.lock().unwrap().stateful.insert(channel.into());
     }
 
+    /// Choose what publishing does when a subscriber of `channel` has a full inbox. Mirrors
+    /// [`retain`](Self::retain): a channel-level setting, [`Overflow::Drop`] until changed.
+    /// Set [`Overflow::Block`] for true backpressure (the producer is paced by the consumer).
+    pub fn set_overflow(&self, channel: impl Into<Channel>, policy: Overflow) {
+        self.inner.lock().unwrap().overflow.insert(channel.into(), policy);
+    }
+
     /// Total number of envelopes dropped so far due to full subscriber inboxes.
     pub fn dropped(&self) -> u64 {
         self.inner.lock().unwrap().dropped
     }
 
-    /// Publish an envelope to every current subscriber of its channel. Never blocks: a
-    /// subscriber whose inbox is full has this envelope dropped (and counted); a subscriber
-    /// whose receiver is gone is pruned. On a stateful channel the envelope also becomes the
-    /// retained value handed to future subscribers.
+    /// Publish an envelope to every current subscriber of its channel. On a stateful channel
+    /// the envelope also becomes the retained value handed to future subscribers.
+    ///
+    /// Fan-out depends on the channel's [`Overflow`] policy:
+    /// * [`Overflow::Drop`] (default) — never blocks: a full inbox has this envelope dropped
+    ///   (and counted in [`dropped`](Self::dropped)); a gone receiver is pruned. The whole
+    ///   non-blocking fan-out runs under the broker lock, as before.
+    /// * [`Overflow::Block`] — blocks the publisher until each inbox has room. The blocking
+    ///   `send()` MUST NOT run while the broker `Mutex` is held, or a publisher stalled on a
+    ///   full inbox would freeze every other publish/subscribe — including the very consumer
+    ///   that would drain it: deadlock. So we snapshot the target subscribers' `SyncSender`s
+    ///   under the lock, **drop the guard**, then do the blocking sends with no lock held. A
+    ///   `Block` subscriber whose receiver is gone is skipped here (its envelope is not a
+    ///   drop) and pruned lazily by the next `Drop`-path publish on the channel.
     pub fn publish(&self, env: Envelope) -> Result<(), BusError> {
-        let mut inner = self.inner.lock().map_err(|e| e.to_string())?;
         let channel = env.channel.clone();
-        if inner.stateful.contains(&channel) {
-            inner.retained.insert(channel.clone(), env.clone());
-        }
-        let dropped = if let Some(list) = inner.subs.get_mut(&channel) {
-            let mut d = 0u64;
-            let mut i = 0;
-            while i < list.len() {
-                match list[i].try_send(env.clone()) {
-                    Ok(()) => i += 1,
-                    // Full: drop for this subscriber, keep it subscribed.
-                    Err(mpsc::TrySendError::Full(_)) => {
-                        d += 1;
-                        i += 1;
-                    }
-                    // Receiver gone: prune (swap_remove is fine, order across subs is unspecified).
-                    Err(mpsc::TrySendError::Disconnected(_)) => {
-                        list.swap_remove(i);
-                    }
-                }
+        // Phase 1: everything that needs the lock. For Drop we also fan out here (fast path);
+        // for Block we only clone the senders so we can fan out *after* releasing the lock.
+        let senders = {
+            let mut inner = self.inner.lock().map_err(|e| e.to_string())?;
+            if inner.stateful.contains(&channel) {
+                inner.retained.insert(channel.clone(), env.clone());
             }
-            d
-        } else {
-            0
+            match inner.overflow.get(&channel).copied().unwrap_or_default() {
+                Overflow::Drop => {
+                    if let Some(list) = inner.subs.get_mut(&channel) {
+                        let mut d = 0u64;
+                        let mut i = 0;
+                        while i < list.len() {
+                            match list[i].try_send(env.clone()) {
+                                Ok(()) => i += 1,
+                                // Full: drop for this subscriber, keep it subscribed.
+                                Err(mpsc::TrySendError::Full(_)) => {
+                                    d += 1;
+                                    i += 1;
+                                }
+                                // Receiver gone: prune (swap_remove ok, sub order is unspecified).
+                                Err(mpsc::TrySendError::Disconnected(_)) => {
+                                    list.swap_remove(i);
+                                }
+                            }
+                        }
+                        inner.dropped += d;
+                    }
+                    return Ok(());
+                }
+                // Snapshot the live senders; the guard is dropped at the end of this block.
+                Overflow::Block => inner.subs.get(&channel).cloned().unwrap_or_default(),
+            }
         };
-        inner.dropped += dropped;
+        // Phase 2: blocking fan-out with NO lock held — this is the backpressure. A gone
+        // receiver returns Err and is simply skipped (not a drop).
+        for tx in &senders {
+            let _ = tx.send(env.clone());
+        }
         Ok(())
     }
 
@@ -285,6 +337,48 @@ mod tests {
         assert!(rx.recv().unwrap().payload["n"].is_number());
         assert!(rx.recv().unwrap().payload["n"].is_number());
         assert!(rx.try_recv().unwrap().is_none());
+    }
+
+    #[test]
+    fn block_policy_paces_producer_and_loses_nothing() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let bus = Arc::new(LocalBus::new());
+        bus.set_overflow("tick", Overflow::Block);
+        // Tiny inbox: with capacity 1 a fast producer must block on a slow consumer.
+        let rx = bus.subscribe_with_capacity("tick", 1);
+
+        // Drain on a second thread *after* a delay, so the blocked producer can make progress
+        // and the test can never hang. The producer of 5 messages can't outrun this drain.
+        let drain = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(20));
+            let mut got = Vec::new();
+            for _ in 0..5 {
+                got.push(rx.recv().unwrap().payload["n"].as_i64().unwrap());
+            }
+            got
+        });
+
+        for i in 0..5 {
+            bus.publish(env("a", "tick", i)).unwrap();
+        }
+
+        let got = drain.join().unwrap();
+        // Every message arrived, in order, and nothing was dropped.
+        assert_eq!(got, vec![0, 1, 2, 3, 4]);
+        assert_eq!(bus.dropped(), 0);
+    }
+
+    #[test]
+    fn drop_is_the_default_policy_for_unconfigured_channels() {
+        let bus = LocalBus::new();
+        // No set_overflow call: the channel keeps the default Drop behavior.
+        let _rx = bus.subscribe_with_capacity("tick", 2);
+        for i in 0..5 {
+            bus.publish(env("a", "tick", i)).unwrap();
+        }
+        assert_eq!(bus.dropped(), 3);
     }
 
     #[test]

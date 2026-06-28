@@ -17,9 +17,48 @@
 //!
 //! Only an **in-process** host is shipped. Because modules are written against the bus
 //! traits, a sidecar or remote transport could be added later without changing a module.
+//!
+//! ## Receive fast, compute on the pool, publish back (no head-of-line blocking)
+//! A module runs on a *single* thread: if its `run` loop does heavy CPU work inline it
+//! stops draining its inbox, and with the bounded bus later messages may be dropped. The
+//! cure is to keep the loop cheap and hand the heavy work to the runtime's shared
+//! [worker pool](Runtime) via [`ModuleCtx::offload`]. The job runs on a pool thread — not
+//! the module's — and publishes its result back onto a channel through a captured
+//! [`ModuleCtx::bus`] handle, which the module (or anyone else) then receives normally:
+//!
+//! ```no_run
+//! # use framelite_core::{Module, ModuleCtx};
+//! # use framelite_protocol::ModuleId;
+//! # use std::time::Duration;
+//! # struct Worker;
+//! # impl Module for Worker {
+//! #     fn id(&self) -> ModuleId { ModuleId::new("worker") }
+//! fn run(self: Box<Self>, ctx: ModuleCtx) {
+//!     while !ctx.should_stop() {
+//!         match ctx.recv_timeout(Duration::from_millis(50)) {
+//!             Ok(Some(job)) => {
+//!                 // Receive fast: don't block the loop on the heavy part.
+//!                 let bus = ctx.bus();
+//!                 let me = ctx.id().clone();
+//!                 ctx.offload(move || {
+//!                     let answer = expensive(&job); // runs on a pool thread
+//!                     let _ = bus.publish(
+//!                         framelite_protocol::Envelope::new(me, "result", answer),
+//!                     );
+//!                 });
+//!             }
+//!             Ok(None) => {}
+//!             Err(_) => break,
+//!         }
+//!     }
+//! }
+//! # }
+//! # fn expensive(_e: &framelite_protocol::Envelope) -> serde_json::Value { serde_json::Value::Null }
+//! ```
 
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -47,13 +86,110 @@ impl Shutdown {
     }
 }
 
+// --- worker pool (offload heavy work off a module's receive loop) ---------------
+
+/// A boxed unit of CPU work to run on the pool.
+type Job = Box<dyn FnOnce() + Send + 'static>;
+
+/// Cheap-to-clone submit handle to the runtime's shared worker pool. A [`ModuleCtx`] holds
+/// one so a module can [`offload`](ModuleCtx::offload) heavy work. When every clone *and*
+/// the pool's own handle are dropped the job queue closes — which is exactly how the
+/// [`Runtime`] tears the pool down without a hang.
+#[derive(Clone)]
+struct PoolHandle {
+    tx: mpsc::Sender<Job>,
+}
+
+impl PoolHandle {
+    fn submit(&self, job: Job) {
+        // If the pool is already shutting down (workers gone), the job is simply dropped.
+        let _ = self.tx.send(job);
+    }
+}
+
+/// A fixed set of worker threads draining one shared job queue. Owned by the [`Runtime`]
+/// (not public surface). Sized from [`std::thread::available_parallelism`] with a sane
+/// fallback, it lets modules push CPU work off their single receive thread so their inbox
+/// keeps draining. Shutdown is deterministic: drop the submit handle so the queue closes,
+/// then join the workers — no leaked or detached threads.
+struct WorkerPool {
+    /// The submit side cloned into every module's [`ModuleCtx`]. `Option` so
+    /// [`WorkerPool::shutdown`] can drop the pool's own copy to help close the queue.
+    handle: Option<PoolHandle>,
+    workers: Vec<JoinHandle<()>>,
+}
+
+impl WorkerPool {
+    fn new() -> Self {
+        let size = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .max(1);
+        let (tx, rx) = mpsc::channel::<Job>();
+        // One receiver shared by all workers: a worker locks only to dequeue, then runs the
+        // job with the lock released so peers can pull the next one concurrently.
+        let rx = Arc::new(Mutex::new(rx));
+        let mut workers = Vec::with_capacity(size);
+        for i in 0..size {
+            let rx = rx.clone();
+            let handle = std::thread::Builder::new()
+                .name(format!("framelite-worker-{i}"))
+                .spawn(move || loop {
+                    let job = {
+                        let guard = rx.lock().unwrap();
+                        guard.recv()
+                    };
+                    match job {
+                        // A panicking job must not take the worker (or the pool) down.
+                        Ok(job) => {
+                            let _ = std::panic::catch_unwind(AssertUnwindSafe(job));
+                        }
+                        // Every sender dropped: the queue is closed, so this worker exits.
+                        Err(_) => break,
+                    }
+                })
+                .expect("failed to spawn worker thread");
+            workers.push(handle);
+        }
+        Self {
+            handle: Some(PoolHandle { tx }),
+            workers,
+        }
+    }
+
+    /// A cheap clone of the submit handle for a module's [`ModuleCtx`].
+    fn handle(&self) -> PoolHandle {
+        self.handle
+            .clone()
+            .expect("worker pool used after shutdown")
+    }
+
+    /// Close the queue and join every worker. Idempotent. Callers must have dropped every
+    /// other [`PoolHandle`] clone first (the [`Runtime`] joins module threads beforehand,
+    /// which drops their [`ModuleCtx`] and thus their handle) so `recv` actually returns.
+    fn shutdown(&mut self) {
+        self.handle = None; // drop the pool's own sender → workers see the channel close.
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for WorkerPool {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 /// What a module gets to talk to the world: its identity, a handle to publish, the merged
-/// inbox of its subscribed channels, and the shared shutdown signal.
+/// inbox of its subscribed channels, the shared shutdown signal, and a handle to the
+/// runtime's worker pool for offloading heavy work off its receive loop.
 pub struct ModuleCtx {
     id: ModuleId,
     bus: Arc<LocalBus>,
     rx: Box<dyn Receiver>,
     shutdown: Shutdown,
+    pool: PoolHandle,
 }
 
 impl ModuleCtx {
@@ -108,6 +244,20 @@ impl ModuleCtx {
     pub fn bus(&self) -> Arc<LocalBus> {
         self.bus.clone()
     }
+
+    /// Run `job` on the runtime's shared **worker pool** instead of this module's thread,
+    /// so the receive loop keeps draining its inbox while the heavy work happens.
+    ///
+    /// This is the *receive fast, compute on the pool, publish back* pattern: the loop does
+    /// the cheap part and hands the expensive part here; the job captures a [`bus`](Self::bus)
+    /// handle and publishes its result back onto a channel when it finishes (see the crate
+    /// docs). The job runs concurrently with — and outlives, if need be — the call, so it
+    /// must own everything it touches (`Send + 'static`); it cannot borrow the module's state.
+    ///
+    /// If the runtime is already shutting down (the pool is gone) the job is silently dropped.
+    pub fn offload<F: FnOnce() + Send + 'static>(&self, job: F) {
+        self.pool.submit(Box::new(job));
+    }
 }
 
 /// A unit of behaviour hosted by the [`Runtime`]. Implement `run` as the module's loop;
@@ -140,13 +290,22 @@ impl JoinReport {
     }
 }
 
-/// The in-process host: owns the [`LocalBus`], the [`Shutdown`] signal, and the threads of
-/// the modules it spawned.
+/// The in-process host: owns the [`LocalBus`], the [`Shutdown`] signal, the shared worker
+/// pool, and the threads of the modules it spawned.
+///
+/// The pool exists so a module never has to choose between draining its inbox and doing
+/// heavy work: a module's `run` stays a tight receive loop and pushes CPU-bound jobs onto
+/// the pool with [`ModuleCtx::offload`] (see the crate-level docs for the *receive fast,
+/// compute on the pool, publish back* pattern). The pool is sized from
+/// [`std::thread::available_parallelism`] and is shut down deterministically by
+/// [`Runtime::join`] — after the modules stop, their handles are dropped and the workers
+/// join, leaving no detached threads.
 pub struct Runtime {
     bus: Arc<LocalBus>,
     shutdown: Shutdown,
     panicked: Arc<Mutex<Vec<ModuleId>>>,
     handles: Vec<(ModuleId, JoinHandle<()>)>,
+    pool: WorkerPool,
 }
 
 impl Default for Runtime {
@@ -169,6 +328,7 @@ impl Runtime {
             shutdown: Shutdown::new(),
             panicked: Arc::new(Mutex::new(Vec::new())),
             handles: Vec::new(),
+            pool: WorkerPool::new(),
         }
     }
 
@@ -197,6 +357,7 @@ impl Runtime {
             bus: self.bus.clone(),
             rx,
             shutdown: self.shutdown.clone(),
+            pool: self.pool.handle(),
         };
         let boxed: Box<dyn Module> = Box::new(module);
         let panicked = self.panicked.clone();
@@ -217,10 +378,14 @@ impl Runtime {
 
     /// Wait for every spawned module to finish, returning which ones panicked. Modules exit
     /// when the bus closes or when they observe [`Runtime::shutdown`].
-    pub fn join(self) -> JoinReport {
-        for (_, handle) in self.handles {
+    pub fn join(mut self) -> JoinReport {
+        for (_, handle) in self.handles.drain(..) {
             let _ = handle.join();
         }
+        // Modules are done → their `ModuleCtx` (and thus their pool handles) are dropped.
+        // Now the only remaining sender is the pool's own: closing it lets the workers
+        // finish the queue and exit, so the join below cannot hang.
+        self.pool.shutdown();
         let panicked = Arc::try_unwrap(self.panicked)
             .map(|m| m.into_inner().unwrap())
             .unwrap_or_default();
