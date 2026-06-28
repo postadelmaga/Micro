@@ -13,6 +13,8 @@
 //! The crate is domain-free on purpose — the app brings the state type, the action enum, and
 //! the reducer. A counter, a tree, a scene graph all reuse the same machinery.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 /// Generic undo/redo history for any cloneable state `S`. Holds the present value plus
@@ -90,7 +92,19 @@ pub const DEFAULT_MAX_DEPTH: usize = 100;
 /// dispatching serializable actions `A` through a fixed reducer.
 pub struct Doc<S, A> {
     history: History<S>,
-    reducer: Box<ReduceFn<S, A>>,
+    reducer: Arc<ReduceFn<S, A>>,
+}
+
+/// Cloneable: the history is cloned and the reducer (immutable) is shared via `Arc`. There is
+/// deliberately no `A: Clone` bound — actions are never stored, only the state history is — so
+/// a host can snapshot/clone a whole document (e.g. one `Doc` per editor tab).
+impl<S: Clone, A> Clone for Doc<S, A> {
+    fn clone(&self) -> Self {
+        Self {
+            history: self.history.clone(),
+            reducer: Arc::clone(&self.reducer),
+        }
+    }
 }
 
 impl<S: Clone, A> Doc<S, A> {
@@ -110,7 +124,7 @@ impl<S: Clone, A> Doc<S, A> {
     ) -> Self {
         Self {
             history: History::new(initial, max_depth),
-            reducer: Box::new(reducer),
+            reducer: Arc::new(reducer),
         }
     }
 
