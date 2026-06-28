@@ -1,0 +1,17 @@
+# framelite-media — the data plane for high-bandwidth payloads.
+#
+# The JSON bus (framelite-bus) is the *control plane*: actions, state, events. It serializes
+# every payload through serde_json, which is right for small control messages and fatal for
+# media — a 1080p frame or an audio block must never be cloned through `serde_json::Value`.
+# This crate is the *data plane*: typed, zero-copy producer→consumer channels that move
+# ownership of big buffers (Arc-backed) with no serialization. The bus carries only the
+# "frame N is ready" handle; the pixels travel here.
+[package]
+name = "framelite-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "framelite media — the zero-copy data plane. Latest-wins and bounded channels move big buffers (frames, audio blocks) by ownership, off the serializing control-plane bus."
+
+[lib]
+name = "framelite_media"

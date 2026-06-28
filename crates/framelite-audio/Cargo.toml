@@ -1,0 +1,23 @@
+# framelite-audio — the audio sink adapter (Phase 4 I/O).
+# Pulls AudioBlocks off the zero-copy media data plane and plays them. The default build is
+# light and headless (no audio device); a real cpal backend lives behind the OFF-by-default
+# `cpal` feature so the workspace builds and tests without hardware.
+
+[package]
+name = "framelite-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "framelite audio — an AudioOut contract and AudioSink module that play audio blocks pulled from the zero-copy media data plane; optional cpal backend behind a feature."
+
+[lib]
+name = "framelite_audio"
+
+[dependencies]
+framelite-core.workspace = true
+framelite-media.workspace = true
+cpal = { version = "0.15", optional = true }
+
+[features]
+default = []
+cpal = ["dep:cpal"]

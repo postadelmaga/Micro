@@ -57,7 +57,7 @@
 //! ```
 
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -66,7 +66,7 @@ use std::time::Duration;
 use framelite_bus::{LocalBus, Receiver};
 use serde::Serialize;
 pub use framelite_bus::{BusError, LocalBus as Bus};
-pub use framelite_protocol::{Channel, Envelope, ModuleId};
+pub use framelite_protocol::{Channel, Envelope, ModuleId, Topic};
 
 /// A cooperative shutdown signal shared by the runtime and every module. Cheap to clone.
 #[derive(Clone)]
@@ -224,6 +224,13 @@ impl ModuleCtx {
             .publish(Envelope::encode(self.id.clone(), channel, msg)?)
     }
 
+    /// Publish a typed message on a [`Topic<T>`] — the compiler-checked form of
+    /// [`publish_msg`](Self::publish_msg): the topic fixes both the channel *and* the payload
+    /// type, so a producer can't send the wrong shape on the wrong channel.
+    pub fn publish_on<T: Serialize>(&self, topic: &Topic<T>, msg: &T) -> Result<(), BusError> {
+        self.bus.publish(topic.encode(self.id.clone(), msg)?)
+    }
+
     /// Block for the next envelope on a subscribed channel (`Err` once the bus closes).
     pub fn recv(&self) -> Result<Envelope, BusError> {
         self.rx.recv()
@@ -306,6 +313,9 @@ pub struct Runtime {
     panicked: Arc<Mutex<Vec<ModuleId>>>,
     handles: Vec<(ModuleId, JoinHandle<()>)>,
     pool: WorkerPool,
+    /// Count of module threads currently running — bumped on spawn, dropped when a module's
+    /// `run` returns (cleanly or by panic). Cheap liveness for a status line.
+    live: Arc<AtomicUsize>,
 }
 
 impl Default for Runtime {
@@ -329,6 +339,7 @@ impl Runtime {
             panicked: Arc::new(Mutex::new(Vec::new())),
             handles: Vec::new(),
             pool: WorkerPool::new(),
+            live: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -340,6 +351,13 @@ impl Runtime {
     /// A clone of the shutdown signal, e.g. to hand to code outside a module.
     pub fn shutdown_signal(&self) -> Shutdown {
         self.shutdown.clone()
+    }
+
+    /// How many spawned modules are still running. Drops to zero as modules finish (on
+    /// shutdown or panic) — pair it with [`LocalBus::metrics`](framelite_bus::LocalBus::metrics)
+    /// for a cheap health view of a running app.
+    pub fn live_count(&self) -> usize {
+        self.live.load(Ordering::Relaxed)
     }
 
     /// Ask every module to stop (cooperative — modules observe it via `should_stop`).
@@ -363,6 +381,8 @@ impl Runtime {
         let panicked = self.panicked.clone();
         let shutdown = self.shutdown.clone();
         let id_for_thread = id.clone();
+        let live = self.live.clone();
+        live.fetch_add(1, Ordering::Relaxed);
         let handle = std::thread::Builder::new()
             .name(id.0.clone())
             .spawn(move || {
@@ -371,6 +391,8 @@ impl Runtime {
                     panicked.lock().unwrap().push(id_for_thread);
                     shutdown.trigger();
                 }
+                // This module is no longer running, however it ended.
+                live.fetch_sub(1, Ordering::Relaxed);
             })
             .expect("failed to spawn module thread");
         self.handles.push((id, handle));

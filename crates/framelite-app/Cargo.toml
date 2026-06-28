@@ -1,0 +1,25 @@
+# framelite-app — the opinionated composition layer over the framelite kernel.
+#
+# The kernel (bus + core + document) is deliberately generic. This crate adds the one
+# opinion that makes framelite a *framework*: the `sources → world → sinks` dataflow.
+# An `App` builder wires modules and channels declaratively; `WorldModule` turns a
+# `Doc<S,A>` into the single stateful node that sources feed and sinks read.
+[package]
+name = "framelite-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "framelite app — the sources → world → sinks composition layer. An App builder wires modules and channels declaratively; WorldModule turns a Doc<S,A> into the single stateful node sources feed and sinks read."
+
+[lib]
+name = "framelite_app"
+
+[dependencies]
+framelite-core.workspace = true
+framelite-bus.workspace = true
+framelite-protocol.workspace = true
+framelite-document.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

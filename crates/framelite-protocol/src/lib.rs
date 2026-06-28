@@ -11,6 +11,8 @@
 //! enum: framelite is the generic core, so an app declares whatever channels it needs
 //! (`"tick"`, `"count"`, `"control"`, …) without editing this crate.
 
+use std::marker::PhantomData;
+
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -110,6 +112,76 @@ impl Envelope {
     }
 }
 
+/// A **typed** view of a channel: a channel name bound, at the type level, to the payload
+/// type `T` that rides on it. It carries no data of `T` (just a name), so it is `Send + Sync
+/// + Clone` for *any* `T`, and it makes the bus contract checkable by the compiler:
+/// [`encode`](Topic::encode) only accepts a `&T`, [`decode`](Topic::decode) only yields a
+/// `T`, so a producer and a consumer that share a `Topic<T>` can never disagree on the shape.
+///
+/// The bus stays string-routed underneath — `Topic<T>` is a zero-cost ergonomic skin, not a
+/// new transport. Declare app topics once and pass them around:
+///
+/// ```
+/// # use framelite_protocol::{Topic, ModuleId};
+/// # use serde::{Serialize, Deserialize};
+/// #[derive(Serialize, Deserialize, PartialEq, Debug)]
+/// struct Tick { n: i64 }
+/// let tick: Topic<Tick> = Topic::new("tick");
+/// let env = tick.encode(ModuleId::new("clock"), &Tick { n: 1 }).unwrap();
+/// assert_eq!(tick.decode(&env).unwrap(), Tick { n: 1 });
+/// ```
+pub struct Topic<T> {
+    channel: Channel,
+    /// `fn() -> T` so the marker is `Send + Sync` and variance is sound regardless of `T`.
+    _marker: PhantomData<fn() -> T>,
+}
+
+impl<T> Topic<T> {
+    /// Bind a channel name to the payload type `T`.
+    pub fn new(channel: impl Into<Channel>) -> Self {
+        Self {
+            channel: channel.into(),
+            _marker: PhantomData,
+        }
+    }
+
+    /// The underlying channel — for `subscribe`/`retain`/`overflow`, which are name-based.
+    pub fn channel(&self) -> &Channel {
+        &self.channel
+    }
+}
+
+impl<T: Serialize> Topic<T> {
+    /// Build an envelope carrying a `T` on this topic's channel, stamped with `from`.
+    pub fn encode(&self, from: ModuleId, msg: &T) -> Result<Envelope, String> {
+        Envelope::encode(from, self.channel.clone(), msg)
+    }
+}
+
+impl<T: DeserializeOwned> Topic<T> {
+    /// Decode an envelope's payload as this topic's `T`. (The caller is expected to only pass
+    /// envelopes from this topic's channel; the type is what the topic guarantees.)
+    pub fn decode(&self, env: &Envelope) -> Result<T, String> {
+        env.decode::<T>()
+    }
+}
+
+/// Cloneable for any `T`: only the channel name is held.
+impl<T> Clone for Topic<T> {
+    fn clone(&self) -> Self {
+        Self {
+            channel: self.channel.clone(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> std::fmt::Debug for Topic<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Topic({})", self.channel)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,5 +223,28 @@ mod tests {
             name: String,
         }
         assert!(env.decode::<Other>().is_err());
+    }
+
+    #[test]
+    fn topic_round_trips_and_targets_its_channel() {
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct Tick {
+            n: i64,
+        }
+        let tick: Topic<Tick> = Topic::new("tick");
+        let env = tick.encode(ModuleId::new("clock"), &Tick { n: 7 }).unwrap();
+        assert_eq!(env.channel, Channel::new("tick"));
+        assert_eq!(tick.decode(&env).unwrap(), Tick { n: 7 });
+    }
+
+    #[test]
+    fn topic_is_clone_and_send_for_any_payload() {
+        // A payload type that is itself neither Send nor Clone must not infect the Topic.
+        #[allow(dead_code)]
+        struct NotSendNotClone(std::rc::Rc<i32>);
+        fn assert_send_clone<X: Send + Clone>(_: &X) {}
+        let t: Topic<NotSendNotClone> = Topic::new("x");
+        assert_send_clone(&t);
+        assert_eq!(t.clone().channel(), &Channel::new("x"));
     }
 }

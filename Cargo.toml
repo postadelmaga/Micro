@@ -10,6 +10,14 @@ members = [
     "crates/framelite-bus",
     "crates/framelite-document",
     "crates/framelite-core",
+    "crates/framelite-app",
+    "crates/framelite-media",
+    "crates/framelite-time",
+    "crates/framelite-bridge",
+    "crates/framelite-input",
+    "crates/framelite-video",
+    "crates/framelite-audio",
+    "crates/framelite-midi-player",
 ]
 
 [workspace.package]
@@ -23,6 +31,14 @@ serde_json = "1"
 framelite-protocol = { path = "crates/framelite-protocol" }
 framelite-bus = { path = "crates/framelite-bus" }
 framelite-document = { path = "crates/framelite-document" }
+framelite-core = { path = "crates/framelite-core" }
+framelite-app = { path = "crates/framelite-app" }
+framelite-media = { path = "crates/framelite-media" }
+framelite-time = { path = "crates/framelite-time" }
+framelite-bridge = { path = "crates/framelite-bridge" }
+framelite-input = { path = "crates/framelite-input" }
+framelite-video = { path = "crates/framelite-video" }
+framelite-audio = { path = "crates/framelite-audio" }
 
 [profile.release]
 opt-level = "z"

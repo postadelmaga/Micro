@@ -86,6 +86,31 @@ struct Inner {
     overflow: HashMap<Channel, Overflow>,
     /// total envelopes dropped because a subscriber inbox was full (observability).
     dropped: u64,
+    /// channel name → envelopes published on it (throughput).
+    published: HashMap<Channel, u64>,
+    /// channel name → envelopes dropped on it for a full inbox (per-channel breakdown).
+    dropped_by_channel: HashMap<Channel, u64>,
+}
+
+/// A point-in-time snapshot of one channel's traffic, from [`LocalBus::metrics`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChannelMetrics {
+    /// Envelopes published on the channel (counted once per publish, not per subscriber).
+    pub published: u64,
+    /// Envelopes dropped on the channel because some subscriber's inbox was full.
+    pub dropped: u64,
+    /// Live subscribers on the channel right now.
+    pub subscribers: usize,
+}
+
+/// A snapshot of the whole bus's traffic, from [`LocalBus::metrics`]. Cheap to take; meant to
+/// be polled (e.g. by a status line or a metrics exporter) without disturbing the bus.
+#[derive(Clone, Debug, Default)]
+pub struct BusMetrics {
+    /// Per-channel counters, keyed by channel name.
+    pub channels: HashMap<Channel, ChannelMetrics>,
+    /// Total drops across every channel (matches [`LocalBus::dropped`]).
+    pub total_dropped: u64,
 }
 
 /// In-process pub/sub broker. Cheap to share behind an `Arc`; all methods take `&self`.
@@ -108,6 +133,8 @@ impl LocalBus {
                 stateful: HashSet::new(),
                 overflow: HashMap::new(),
                 dropped: 0,
+                published: HashMap::new(),
+                dropped_by_channel: HashMap::new(),
             }),
         }
     }
@@ -130,6 +157,27 @@ impl LocalBus {
         self.inner.lock().unwrap().dropped
     }
 
+    /// A snapshot of per-channel traffic (published, dropped, live subscribers) plus the
+    /// global drop total. Cheap and non-disturbing — poll it from a status line, a debug
+    /// overlay, or a metrics exporter to watch a real-time pipeline for overload.
+    pub fn metrics(&self) -> BusMetrics {
+        let inner = self.inner.lock().unwrap();
+        let mut channels: HashMap<Channel, ChannelMetrics> = HashMap::new();
+        for (ch, &published) in &inner.published {
+            channels.entry(ch.clone()).or_default().published = published;
+        }
+        for (ch, &dropped) in &inner.dropped_by_channel {
+            channels.entry(ch.clone()).or_default().dropped = dropped;
+        }
+        for (ch, subs) in &inner.subs {
+            channels.entry(ch.clone()).or_default().subscribers = subs.len();
+        }
+        BusMetrics {
+            channels,
+            total_dropped: inner.dropped,
+        }
+    }
+
     /// Publish an envelope to every current subscriber of its channel. On a stateful channel
     /// the envelope also becomes the retained value handed to future subscribers.
     ///
@@ -150,6 +198,7 @@ impl LocalBus {
         // for Block we only clone the senders so we can fan out *after* releasing the lock.
         let senders = {
             let mut inner = self.inner.lock().map_err(|e| e.to_string())?;
+            *inner.published.entry(channel.clone()).or_default() += 1;
             if inner.stateful.contains(&channel) {
                 inner.retained.insert(channel.clone(), env.clone());
             }
@@ -173,6 +222,9 @@ impl LocalBus {
                             }
                         }
                         inner.dropped += d;
+                        if d > 0 {
+                            *inner.dropped_by_channel.entry(channel.clone()).or_default() += d;
+                        }
                     }
                     return Ok(());
                 }
@@ -379,6 +431,33 @@ mod tests {
             bus.publish(env("a", "tick", i)).unwrap();
         }
         assert_eq!(bus.dropped(), 3);
+    }
+
+    #[test]
+    fn metrics_report_published_dropped_and_subscribers_per_channel() {
+        let bus = LocalBus::new();
+        // Capacity 2, never drained: publishes 3..=5 are dropped on "tick".
+        let _rx = bus.subscribe_with_capacity("tick", 2);
+        for i in 0..5 {
+            bus.publish(env("a", "tick", i)).unwrap();
+        }
+        // A second channel with no drops.
+        let _rx2 = bus.subscribe("count");
+        bus.publish(env("a", "count", 1)).unwrap();
+
+        let m = bus.metrics();
+        let tick = m.channels.get(&Channel::new("tick")).unwrap();
+        assert_eq!(tick.published, 5);
+        assert_eq!(tick.dropped, 3);
+        assert_eq!(tick.subscribers, 1);
+
+        let count = m.channels.get(&Channel::new("count")).unwrap();
+        assert_eq!(count.published, 1);
+        assert_eq!(count.dropped, 0);
+        assert_eq!(count.subscribers, 1);
+
+        assert_eq!(m.total_dropped, 3);
+        assert_eq!(m.total_dropped, bus.dropped());
     }
 
     #[test]
