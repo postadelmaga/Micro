@@ -1,0 +1,13 @@
+[package]
+name = "framelite-document"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "framelite document — a generic undoable state container. Doc<S> dispatches Command<S> mutations through an undo/redo History<S>. No domain types: the app supplies the state and the commands."
+
+[lib]
+name = "framelite_document"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

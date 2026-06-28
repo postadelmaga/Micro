@@ -1,0 +1,13 @@
+[package]
+name = "framelite-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "framelite protocol — the addressable bus messages. Zero logic: ModuleId, Channel, Envelope. Generic string-named channels; JSON payloads."
+
+[lib]
+name = "framelite_protocol"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
