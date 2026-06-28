@@ -1366,6 +1366,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "framelite-demo"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "framelite-app",
+ "framelite-bus",
+ "framelite-core",
+ "framelite-document",
+ "framelite-input",
+ "framelite-media",
+ "framelite-protocol",
+ "framelite-time",
+ "serde",
+]
+
+[[package]]
 name = "framelite-document"
 version = "0.1.0"
 dependencies = [

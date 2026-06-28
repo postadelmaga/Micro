@@ -17,7 +17,7 @@ members = [
     "crates/framelite-input",
     "crates/framelite-video",
     "crates/framelite-audio",
-    "crates/framelite-midi-player",
+    "crates/framelite-demo",
 ]
 
 [workspace.package]
@@ -39,6 +39,16 @@ framelite-bridge = { path = "crates/framelite-bridge" }
 framelite-input = { path = "crates/framelite-input" }
 framelite-video = { path = "crates/framelite-video" }
 framelite-audio = { path = "crates/framelite-audio" }
+
+# Keep `cargo run` (debug) usable for the real-time demo: a software rasterizer + serde +
+# texture uploads at 60fps are unbearable at opt-level 0. opt-level 1 on workspace crates and
+# 2 on dependencies stays quick to compile while making the debug build smooth — so "slow in
+# debug" never masquerades as a framework cost. Release stays size-optimized below.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
 
 [profile.release]
 opt-level = "z"

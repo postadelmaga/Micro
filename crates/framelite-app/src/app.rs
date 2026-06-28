@@ -125,6 +125,12 @@ impl App {
         self.spawn(WorldModule::new(id, actions, state, doc))
     }
 
+    /// How many spawned modules are still running — drops to zero as modules finish. Cheap
+    /// liveness for a status overlay; pair with [`bus().metrics()`](framelite_bus::LocalBus::metrics).
+    pub fn live_count(&self) -> usize {
+        self.rt.live_count()
+    }
+
     /// Ask every module to stop (cooperative — modules observe it via `should_stop`).
     pub fn shutdown(&self) {
         self.rt.shutdown();
