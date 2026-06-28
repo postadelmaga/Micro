@@ -5,7 +5,9 @@
 **The minimal, generic core of the [Frame](../Frame) architecture — 100% Rust.**
 
 A tiny modules + bus micro-kernel: a string-named pub/sub bus, a generic undoable
-document, and an in-process module runtime. Nothing else. Build your app on top.
+document, and an in-process module runtime. On top of it — in **separate, optional crates**
+that never touch the kernel — an opinionated **`sources → world → sinks`** framework: time,
+input, video, audio, a zero-copy media plane, and a bus-over-socket bridge.
 
 </div>
 
@@ -60,24 +62,51 @@ framelite is small but not fragile — the bus and runtime are bounded and super
 - **No head-of-line blocking.** A shared worker pool lets a module `ctx.offload(job)` heavy CPU
   work off its receive loop — *receive fast, compute on the pool, publish the result back*.
 
+## The framework layer
+
+The kernel is unopinionated on purpose — it never says what a "frame", an "input", or a
+"sink" *is*. Built on top of it, a thin framework gives those words meaning around one
+dataflow spine: **`sources → world → sinks`**. Sources publish actions/events; the *world* is
+the one stateful node (a `Doc<S, A>` reducer that republishes state on a retained channel);
+sinks read state and render. Two planes are kept strictly apart: the **control plane**
+(actions/state/events) flows as JSON envelopes over the bus; **high-bandwidth media** (video
+frames, audio blocks) never touches serde — it rides a separate zero-copy data plane.
+
+Every part is a separate, additive crate; use only what you need, the kernel stays generic.
+
 ## Layout
 
 ```
 crates/
+  # micro-kernel — generic, zero domain
   framelite-protocol/  ModuleId, Channel, Envelope, ChannelKind   (zero logic)
-  framelite-bus/       Sender/Receiver traits + LocalBus broker (+ retained channels)
+  framelite-bus/       Sender/Receiver traits + LocalBus broker  (+ retained, metrics)
   framelite-document/  History<S>, Doc<S, A> + reducer          (undo/redo, transactional)
-  framelite-core/      Module, ModuleCtx, Runtime + worker pool (the in-process micro-kernel)
+  framelite-core/      Module, ModuleCtx, Runtime + worker pool  (the in-process kernel)
+
+  # framework — opinionated sources → world → sinks, built only on the kernel
+  framelite-app/       App builder + WorldModule<S, A>          (declarative wiring)
+  framelite-media/     zero-copy data plane: latest() + bounded()  (Frame, AudioBlock)
+  framelite-time/      Clock source (Tick) + Pacer frame-limiter
+  framelite-input/     device-neutral InputEvent + InputMapper<A> → bus actions
+  framelite-video/     FrameSink trait + VideoSink module (+ headless BufferSink)
+  framelite-audio/     AudioOut trait + AudioSink module (+ headless Recorder, opt cpal)
+  framelite-bridge/    the bus over a byte stream             (length-prefixed envelopes)
+
+  # showcase app — the framework wired into a real pipeline
+  framelite-stems/     MP3 → Demucs stems → per-stem MIDI (basic-pitch), orchestrated
 ```
 
 **Enforced boundaries:** `protocol` depends on nothing; `bus` and `document` depend only on
-`protocol` (and `document` not even that); only `core` composes everything.
+`protocol` (and `document` not even that); only `core` composes the kernel. Every framework
+crate builds on the kernel and stays independent of the others.
 
 ## Try it
 
 ```sh
 cargo test --workspace
-cargo run -p framelite-core --example counter
+cargo run -p framelite-core --example counter        # the bare kernel
+cargo run -p framelite-app  --example world_counter  # the App + world spine
 ```
 
 The `counter` example wires a `Ticker` and a `Store` over the bus: the ticker emits
@@ -93,6 +122,17 @@ count = 5
 done.
 ```
 
+For the framework in anger, see **`framelite-stems`**: it points framelite at a real pipeline
+— an MP3 is split into instrument stems by Demucs and each melodic stem transcribed to MIDI by
+Spotify's basic-pitch, the stems transcribing in parallel on the worker pool. framelite is the
+*spine*, not the DSP: the bus carries only file paths and progress (handles, not bytes), while
+the audio stays in files the subprocess tools exchange on disk.
+
+```sh
+cargo run -p framelite-stems -- --check          # verify the external tools are present
+cargo run -p framelite-stems -- song.mp3 --out stems-out
+```
+
 ## Extending it
 
 - **A new module** = implement `Module`, name its channels, write its `run` loop, `rt.spawn(it)`.
@@ -100,7 +140,8 @@ done.
 - **Heavy work** = `ctx.offload(job)` so the receive loop keeps draining.
 - **A new topic** = just publish on a new channel name. No core changes.
 - **A new transport** (sidecar, socket) = implement the `Sender`/`Receiver` traits; modules
-  written against them don't change. (Not shipped — this is the seam Frame grows along.)
+  written against them don't change. `framelite-bridge` already does this — it carries the bus
+  over any byte stream (proven over TCP loopback), the seam Frame grows along.
 
 ---
 
