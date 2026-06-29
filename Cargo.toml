@@ -1,23 +1,23 @@
-# framelite — the minimal core of the Frame architecture.
+# Micro — the minimal core of the Frame architecture.
 #
 # A tiny, *generic* modules+bus micro-kernel: a string-named pub/sub bus, a generic
 # undoable document, and an in-process module runtime. No renderer, audio, sidecars,
-# plugins or domain packs — that weight is what an app built *on top* of framelite adds.
+# plugins or domain packs — that weight is what an app built *on top* of Micro adds.
 [workspace]
 resolver = "2"
 members = [
-    "crates/framelite-protocol",
-    "crates/framelite-bus",
-    "crates/framelite-document",
-    "crates/framelite-core",
-    "crates/framelite-app",
-    "crates/framelite-media",
-    "crates/framelite-time",
-    "crates/framelite-bridge",
-    "crates/framelite-input",
-    "crates/framelite-video",
-    "crates/framelite-audio",
-    "crates/framelite-stems",
+    "crates/micro-protocol",
+    "crates/micro-bus",
+    "crates/micro-document",
+    "crates/micro-core",
+    "crates/micro-app",
+    "crates/micro-media",
+    "crates/micro-time",
+    "crates/micro-bridge",
+    "crates/micro-input",
+    "crates/micro-video",
+    "crates/micro-audio",
+    "crates/micro-stems",
 ]
 
 [workspace.package]
@@ -28,17 +28,17 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-framelite-protocol = { path = "crates/framelite-protocol" }
-framelite-bus = { path = "crates/framelite-bus" }
-framelite-document = { path = "crates/framelite-document" }
-framelite-core = { path = "crates/framelite-core" }
-framelite-app = { path = "crates/framelite-app" }
-framelite-media = { path = "crates/framelite-media" }
-framelite-time = { path = "crates/framelite-time" }
-framelite-bridge = { path = "crates/framelite-bridge" }
-framelite-input = { path = "crates/framelite-input" }
-framelite-video = { path = "crates/framelite-video" }
-framelite-audio = { path = "crates/framelite-audio" }
+micro-protocol = { path = "crates/micro-protocol" }
+micro-bus = { path = "crates/micro-bus" }
+micro-document = { path = "crates/micro-document" }
+micro-core = { path = "crates/micro-core" }
+micro-app = { path = "crates/micro-app" }
+micro-media = { path = "crates/micro-media" }
+micro-time = { path = "crates/micro-time" }
+micro-bridge = { path = "crates/micro-bridge" }
+micro-input = { path = "crates/micro-input" }
+micro-video = { path = "crates/micro-video" }
+micro-audio = { path = "crates/micro-audio" }
 
 # Make debug builds usable for the apps without giving up fast iteration: opt-level 1 on the
 # workspace crates and 2 on dependencies keeps `cargo run` responsive while staying quick to

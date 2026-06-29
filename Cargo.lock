@@ -209,116 +209,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
-name = "framelite-app"
-version = "0.1.0"
-dependencies = [
- "framelite-bus",
- "framelite-core",
- "framelite-document",
- "framelite-protocol",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "framelite-audio"
-version = "0.1.0"
-dependencies = [
- "cpal",
- "framelite-core",
- "framelite-media",
-]
-
-[[package]]
-name = "framelite-bridge"
-version = "0.1.0"
-dependencies = [
- "framelite-bus",
- "framelite-protocol",
- "serde_json",
-]
-
-[[package]]
-name = "framelite-bus"
-version = "0.1.0"
-dependencies = [
- "framelite-protocol",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "framelite-core"
-version = "0.1.0"
-dependencies = [
- "framelite-bus",
- "framelite-document",
- "framelite-protocol",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "framelite-document"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "framelite-input"
-version = "0.1.0"
-dependencies = [
- "framelite-bus",
- "framelite-protocol",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "framelite-media"
-version = "0.1.0"
-
-[[package]]
-name = "framelite-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "framelite-stems"
-version = "0.1.0"
-dependencies = [
- "framelite-app",
- "framelite-bus",
- "framelite-core",
- "framelite-protocol",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "framelite-time"
-version = "0.1.0"
-dependencies = [
- "framelite-core",
- "framelite-protocol",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "framelite-video"
-version = "0.1.0"
-dependencies = [
- "framelite-core",
- "framelite-media",
-]
-
-[[package]]
 name = "futures-core"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -492,6 +382,116 @@ name = "memchr"
 version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
+
+[[package]]
+name = "micro-app"
+version = "0.1.0"
+dependencies = [
+ "micro-bus",
+ "micro-core",
+ "micro-document",
+ "micro-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "micro-audio"
+version = "0.1.0"
+dependencies = [
+ "cpal",
+ "micro-core",
+ "micro-media",
+]
+
+[[package]]
+name = "micro-bridge"
+version = "0.1.0"
+dependencies = [
+ "micro-bus",
+ "micro-protocol",
+ "serde_json",
+]
+
+[[package]]
+name = "micro-bus"
+version = "0.1.0"
+dependencies = [
+ "micro-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "micro-core"
+version = "0.1.0"
+dependencies = [
+ "micro-bus",
+ "micro-document",
+ "micro-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "micro-document"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "micro-input"
+version = "0.1.0"
+dependencies = [
+ "micro-bus",
+ "micro-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "micro-media"
+version = "0.1.0"
+
+[[package]]
+name = "micro-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "micro-stems"
+version = "0.1.0"
+dependencies = [
+ "micro-app",
+ "micro-bus",
+ "micro-core",
+ "micro-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "micro-time"
+version = "0.1.0"
+dependencies = [
+ "micro-core",
+ "micro-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "micro-video"
+version = "0.1.0"
+dependencies = [
+ "micro-core",
+ "micro-media",
+]
 
 [[package]]
 name = "minimal-lexical"

@@ -1,0 +1,23 @@
+# micro-time — cadence for the dataflow.
+#
+# Sinks don't run flat-out: video paces to a frame rate, audio to its callback, simulations
+# to a fixed step. This crate gives two pieces: `Clock`, a Source module that publishes a
+# `Tick` on the bus at a fixed rate (a shared heartbeat for a world or a sink), and `Pacer`,
+# a frame-limiter a sink drives itself to hold a target rate and learn its delta time.
+[package]
+name = "micro-time"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Micro time — a Clock source that ticks the bus at a fixed rate, and a Pacer frame-limiter that gives a sink its cadence and delta time."
+
+[lib]
+name = "micro_time"
+
+[dependencies]
+micro-core.workspace = true
+micro-protocol.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

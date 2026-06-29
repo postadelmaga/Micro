@@ -1,0 +1,14 @@
+[package]
+name = "micro-bus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Micro bus — the abstract transport. Modules talk through Sender/Receiver traits over an in-process pub/sub broker (LocalBus) and never know who the peer is. 'Write once, host anywhere.'"
+
+[lib]
+name = "micro_bus"
+
+[dependencies]
+micro-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true

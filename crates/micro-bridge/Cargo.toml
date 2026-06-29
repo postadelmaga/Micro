@@ -1,0 +1,21 @@
+# micro-bridge — connect two buses across a process or network boundary.
+#
+# The bus is defined by the abstract Sender/Receiver traits precisely so a non-local transport
+# can be *added* without changing a single module. This crate is the proof: it forwards
+# selected channels of a LocalBus over a byte stream (TCP, a pipe, anything Read+Write) as
+# length-prefixed JSON, and republishes them onto a bus in the other process. A module that
+# publishes "frame-ready" doesn't know — or care — that the consumer is in another process.
+[package]
+name = "micro-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Micro bridge — forward bus channels across a process/network boundary over any Read+Write stream, proving the Sender/Receiver transport abstraction."
+
+[lib]
+name = "micro_bridge"
+
+[dependencies]
+micro-bus.workspace = true
+micro-protocol.workspace = true
+serde_json.workspace = true

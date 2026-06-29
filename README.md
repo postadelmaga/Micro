@@ -1,6 +1,6 @@
 <div align="center">
 
-# ◇ framelite
+# ◇ Micro
 
 **The minimal, generic core of the [Frame](../Frame) architecture — 100% Rust.**
 
@@ -13,13 +13,13 @@ input, video, audio, a zero-copy media plane, and a bus-over-socket bridge.
 
 ---
 
-## What is framelite?
+## What is Micro?
 
-framelite is **Frame distilled to its skeleton**. Frame is a full desktop-app framework
-(Dioxus/Vello UI, a rend3 3D sidecar, a `cpal` synth, sandboxed plugins). framelite keeps
+Micro is **Frame distilled to its skeleton**. Frame is a full desktop-app framework
+(Dioxus/Vello UI, a rend3 3D sidecar, a `cpal` synth, sandboxed plugins). Micro keeps
 only the part that makes that architecture *an architecture* — and makes it **generic**:
 
-| | Frame | framelite |
+| | Frame | Micro |
 |---|---|---|
 | Channels | fixed enum (`Audio`/`Scene`/`Control`/`Input`) | **free-form strings** — app defines its own |
 | Bus | LocalBus + IpcBus + shmem ring | **LocalBus only** (in-process pub/sub) |
@@ -27,28 +27,28 @@ only the part that makes that architecture *an architecture* — and makes it **
 | Document | `Doc<TSchema>` + migrations | `Doc<S, A>` + reducer + undo/redo |
 | Domain | scene, audio, kernels, trees, plugins | **none** — you bring it |
 
-The boundaries are the same; the weight is gone. An app built *on* framelite adds renderers,
+The boundaries are the same; the weight is gone. An app built *on* Micro adds renderers,
 audio, sidecars, or plugins itself.
 
 ## The three ideas
 
-1. **`Channel` + `Envelope` (`framelite-protocol`)** — the only types modules share. Routing
+1. **`Channel` + `Envelope` (`micro-protocol`)** — the only types modules share. Routing
    is by channel name; a module never inspects another's internals.
-2. **`LocalBus` (`framelite-bus`)** — an in-process pub/sub broker. Subscribe to channels,
+2. **`LocalBus` (`micro-bus`)** — an in-process pub/sub broker. Subscribe to channels,
    publish envelopes. Channels marked `retain` keep their last value and replay it to late
    subscribers (the generic form of Frame's "replay a State channel on resubscribe").
-3. **`Doc<S, A>` + reducer (`framelite-document`)** — the single source of truth. Every edit
+3. **`Doc<S, A>` + reducer (`micro-document`)** — the single source of truth. Every edit
    is a **serializable action** `A` applied by one reducer `Fn(&mut S, &A)`, transactionally
    (on a clone first) and undoably. Mutations are *data*: loggable, replayable, bus-sendable.
 
-`framelite-core` ties them together: a **`Module`** declares its channel subscriptions and a
+`micro-core` ties them together: a **`Module`** declares its channel subscriptions and a
 `run` loop; the **`Runtime`** subscribes it to the bus and spawns it on its own thread.
 Modules talk only through their `ModuleCtx` — never to each other — so any module is
 swappable.
 
 ## Robustness
 
-framelite is small but not fragile — the bus and runtime are bounded and supervised:
+Micro is small but not fragile — the bus and runtime are bounded and supervised:
 
 - **Bounded inboxes, no OOM.** Every subscriber queue is bounded (`sync_channel`); a runaway
   producer can't grow memory without limit.
@@ -79,22 +79,22 @@ Every part is a separate, additive crate; use only what you need, the kernel sta
 ```
 crates/
   # micro-kernel — generic, zero domain
-  framelite-protocol/  ModuleId, Channel, Envelope, ChannelKind   (zero logic)
-  framelite-bus/       Sender/Receiver traits + LocalBus broker  (+ retained, metrics)
-  framelite-document/  History<S>, Doc<S, A> + reducer          (undo/redo, transactional)
-  framelite-core/      Module, ModuleCtx, Runtime + worker pool  (the in-process kernel)
+  micro-protocol/  ModuleId, Channel, Envelope, ChannelKind   (zero logic)
+  micro-bus/       Sender/Receiver traits + LocalBus broker  (+ retained, metrics)
+  micro-document/  History<S>, Doc<S, A> + reducer          (undo/redo, transactional)
+  micro-core/      Module, ModuleCtx, Runtime + worker pool  (the in-process kernel)
 
   # framework — opinionated sources → world → sinks, built only on the kernel
-  framelite-app/       App builder + WorldModule<S, A>          (declarative wiring)
-  framelite-media/     zero-copy data plane: latest() + bounded()  (Frame, AudioBlock)
-  framelite-time/      Clock source (Tick) + Pacer frame-limiter
-  framelite-input/     device-neutral InputEvent + InputMapper<A> → bus actions
-  framelite-video/     FrameSink trait + VideoSink module (+ headless BufferSink)
-  framelite-audio/     AudioOut trait + AudioSink module (+ headless Recorder, opt cpal)
-  framelite-bridge/    the bus over a byte stream             (length-prefixed envelopes)
+  micro-app/       App builder + WorldModule<S, A>          (declarative wiring)
+  micro-media/     zero-copy data plane: latest() + bounded()  (Frame, AudioBlock)
+  micro-time/      Clock source (Tick) + Pacer frame-limiter
+  micro-input/     device-neutral InputEvent + InputMapper<A> → bus actions
+  micro-video/     FrameSink trait + VideoSink module (+ headless BufferSink)
+  micro-audio/     AudioOut trait + AudioSink module (+ headless Recorder, opt cpal)
+  micro-bridge/    the bus over a byte stream             (length-prefixed envelopes)
 
   # showcase app — the framework wired into a real pipeline
-  framelite-stems/     MP3 → Demucs stems → per-stem MIDI (basic-pitch), orchestrated
+  micro-stems/     MP3 → Demucs stems → per-stem MIDI (basic-pitch), orchestrated
 ```
 
 **Enforced boundaries:** `protocol` depends on nothing; `bus` and `document` depend only on
@@ -105,8 +105,8 @@ crate builds on the kernel and stays independent of the others.
 
 ```sh
 cargo test --workspace
-cargo run -p framelite-core --example counter        # the bare kernel
-cargo run -p framelite-app  --example world_counter  # the App + world spine
+cargo run -p micro-core --example counter        # the bare kernel
+cargo run -p micro-app  --example world_counter  # the App + world spine
 ```
 
 The `counter` example wires a `Ticker` and a `Store` over the bus: the ticker emits
@@ -122,15 +122,15 @@ count = 5
 done.
 ```
 
-For the framework in anger, see **`framelite-stems`**: it points framelite at a real pipeline
+For the framework in anger, see **`micro-stems`**: it points Micro at a real pipeline
 — an MP3 is split into instrument stems by Demucs and each melodic stem transcribed to MIDI by
-Spotify's basic-pitch, the stems transcribing in parallel on the worker pool. framelite is the
+Spotify's basic-pitch, the stems transcribing in parallel on the worker pool. Micro is the
 *spine*, not the DSP: the bus carries only file paths and progress (handles, not bytes), while
 the audio stays in files the subprocess tools exchange on disk.
 
 ```sh
-cargo run -p framelite-stems -- --check          # verify the external tools are present
-cargo run -p framelite-stems -- song.mp3 --out stems-out
+cargo run -p micro-stems -- --check          # verify the external tools are present
+cargo run -p micro-stems -- song.mp3 --out stems-out
 ```
 
 ## Extending it
@@ -140,7 +140,7 @@ cargo run -p framelite-stems -- song.mp3 --out stems-out
 - **Heavy work** = `ctx.offload(job)` so the receive loop keeps draining.
 - **A new topic** = just publish on a new channel name. No core changes.
 - **A new transport** (sidecar, socket) = implement the `Sender`/`Receiver` traits; modules
-  written against them don't change. `framelite-bridge` already does this — it carries the bus
+  written against them don't change. `micro-bridge` already does this — it carries the bus
   over any byte stream (proven over TCP loopback), the seam Frame grows along.
 
 ---

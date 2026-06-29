@@ -1,0 +1,13 @@
+[package]
+name = "micro-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Micro protocol — the addressable bus messages. Zero logic: ModuleId, Channel, Envelope. Generic string-named channels; JSON payloads."
+
+[lib]
+name = "micro_protocol"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

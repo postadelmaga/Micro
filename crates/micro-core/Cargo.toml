@@ -1,0 +1,19 @@
+[package]
+name = "micro-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Micro core — the module runtime that ties the bus and document together. A Module subscribes to channels and runs on its own thread; the Runtime spawns and supervises them in-process."
+
+[lib]
+name = "micro_core"
+
+[dependencies]
+micro-protocol.workspace = true
+micro-bus.workspace = true
+micro-document.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

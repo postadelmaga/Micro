@@ -1,0 +1,25 @@
+# micro-app — the opinionated composition layer over the Micro kernel.
+#
+# The kernel (bus + core + document) is deliberately generic. This crate adds the one
+# opinion that makes micro a *framework*: the `sources → world → sinks` dataflow.
+# An `App` builder wires modules and channels declaratively; `WorldModule` turns a
+# `Doc<S,A>` into the single stateful node that sources feed and sinks read.
+[package]
+name = "micro-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Micro app — the sources → world → sinks composition layer. An App builder wires modules and channels declaratively; WorldModule turns a Doc<S,A> into the single stateful node sources feed and sinks read."
+
+[lib]
+name = "micro_app"
+
+[dependencies]
+micro-core.workspace = true
+micro-bus.workspace = true
+micro-protocol.workspace = true
+micro-document.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

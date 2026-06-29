@@ -1,0 +1,19 @@
+# micro input — the source end of the dataflow: device-neutral input events and an
+# InputMapper that translates them into app actions published on the bus for the world to reduce.
+[package]
+name = "micro-input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Micro input — device-neutral input events and an InputMapper that turns them into bus actions for the world to reduce."
+
+[lib]
+name = "micro_input"
+
+[dependencies]
+micro-bus.workspace = true
+micro-protocol.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

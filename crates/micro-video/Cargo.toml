@@ -1,0 +1,15 @@
+# micro video — the sink end of the dataflow: a FrameSink contract and a VideoSink module
+# that present frames pulled from the zero-copy media data plane (never off the serializing bus).
+[package]
+name = "micro-video"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Micro video — a FrameSink contract and VideoSink module that present frames pulled from the zero-copy media data plane."
+
+[lib]
+name = "micro_video"
+
+[dependencies]
+micro-core.workspace = true
+micro-media.workspace = true
