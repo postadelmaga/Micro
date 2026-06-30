@@ -12,3 +12,15 @@ name = "micro_bus"
 micro-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# IPC-only transport deps (feature = "ipc"): postcard for the binary stdio codec, memmap2 for
+# the shared-memory state slot. Kept optional so a pure in-process app pulls none of them.
+memmap2 = { version = "0.9", optional = true }
+postcard = { version = "1", features = ["use-std"], optional = true }
+
+[target.'cfg(unix)'.dependencies]
+# POSIX shm_open/ftruncate/mmap for the Unix shared-memory slot (feature = "ipc").
+libc = { version = "0.2", optional = true }
+
+[features]
+# Out-of-process transports: stdio codec (JSON/postcard) + the shared-memory state slot.
+ipc = ["dep:memmap2", "dep:postcard", "dep:libc"]

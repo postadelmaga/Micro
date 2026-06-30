@@ -39,6 +39,14 @@ use std::time::Duration;
 
 pub use micro_protocol::{Channel, Envelope, ModuleId};
 
+// Out-of-process transports (stdio JSON/postcard codec + thread-channel pair) and the
+// shared-memory latest-wins state slot. Each just `impl`s the Sender/Receiver traits below.
+// Behind the `ipc` feature so a pure in-process app pulls none of the memmap/codec weight.
+#[cfg(feature = "ipc")]
+pub mod ipc;
+#[cfg(feature = "ipc")]
+pub mod shmem;
+
 /// Bus error as a message — matches the project's lightweight error style.
 pub type BusError = String;
 
