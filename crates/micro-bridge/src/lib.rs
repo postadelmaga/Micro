@@ -28,28 +28,114 @@ use micro_bus::{Channel, Envelope, LocalBus};
 /// How often an egress loop wakes to check for shutdown while idle.
 const POLL: Duration = Duration::from_millis(100);
 
-/// Write one envelope to `w` as a little-endian `u32` length prefix followed by its JSON.
-pub fn write_frame(w: &mut impl Write, env: &Envelope) -> io::Result<()> {
-    let bytes = serde_json::to_vec(env).map_err(io::Error::other)?;
-    w.write_all(&(bytes.len() as u32).to_le_bytes())?;
-    w.write_all(&bytes)?;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameKind {
+    Raw = 0,
+    Json = 1,
+}
+
+impl TryFrom<u8> for FrameKind {
+    type Error = String;
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(FrameKind::Raw),
+            1 => Ok(FrameKind::Json),
+            v => Err(format!("Unknown FrameKind: {}", v)),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RawFrame {
+    pub channel: String,
+    pub kind: FrameKind,
+    pub data: Vec<u8>,
+}
+
+/// Write a raw frame to `w` using binary layout: length (u32), kind (u8), channel_len (u16), channel, data.
+pub fn write_raw_frame(w: &mut impl Write, frame: &RawFrame) -> io::Result<()> {
+    let channel_bytes = frame.channel.as_bytes();
+    if channel_bytes.len() > u16::MAX as usize {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "Channel name too long"));
+    }
+    
+    // total_len excludes total_len itself (4 bytes)
+    // total_len = 1 (kind) + 2 (channel_len) + channel_bytes.len() + data.len()
+    let total_len = 1 + 2 + channel_bytes.len() + frame.data.len();
+    
+    w.write_all(&(total_len as u32).to_le_bytes())?;
+    w.write_all(&[frame.kind as u8])?;
+    w.write_all(&(channel_bytes.len() as u16).to_le_bytes())?;
+    w.write_all(channel_bytes)?;
+    w.write_all(&frame.data)?;
     w.flush()
 }
 
-/// Read one framed envelope from `r`. Returns `Ok(None)` at a clean end of stream (the peer
-/// closed), `Err` on a malformed frame or I/O error.
-pub fn read_frame(r: &mut impl Read) -> io::Result<Option<Envelope>> {
-    let mut len = [0u8; 4];
-    match r.read_exact(&mut len) {
+/// Read a raw frame from `r`. Returns `Ok(None)` on clean EOF, `Err` on I/O or malformed frame.
+pub fn read_raw_frame(r: &mut impl Read) -> io::Result<Option<RawFrame>> {
+    let mut total_len_bytes = [0u8; 4];
+    match r.read_exact(&mut total_len_bytes) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(e),
     }
-    let n = u32::from_le_bytes(len) as usize;
-    let mut buf = vec![0u8; n];
-    r.read_exact(&mut buf)?;
-    let env = serde_json::from_slice(&buf).map_err(io::Error::other)?;
-    Ok(Some(env))
+    
+    let total_len = u32::from_le_bytes(total_len_bytes) as usize;
+    if total_len < 3 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Frame too small"));
+    }
+    
+    let mut buffer = vec![0u8; total_len];
+    r.read_exact(&mut buffer)?;
+    
+    let kind_byte = buffer[0];
+    let kind = FrameKind::try_from(kind_byte)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        
+    let channel_len = u16::from_le_bytes([buffer[1], buffer[2]]) as usize;
+    if 3 + channel_len > total_len {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "Invalid channel length"));
+    }
+    
+    let channel_bytes = &buffer[3..3 + channel_len];
+    let channel = String::from_utf8(channel_bytes.to_vec())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        
+    let data = buffer[3 + channel_len..].to_vec();
+    
+    Ok(Some(RawFrame {
+        channel,
+        kind,
+        data,
+    }))
+}
+
+/// Write one envelope to `w` by serializing it as a JSON payload inside a `RawFrame`.
+pub fn write_frame(w: &mut impl Write, env: &Envelope) -> io::Result<()> {
+    let bytes = serde_json::to_vec(env).map_err(io::Error::other)?;
+    let frame = RawFrame {
+        channel: env.channel.0.clone(),
+        kind: FrameKind::Json,
+        data: bytes,
+    };
+    write_raw_frame(w, &frame)
+}
+
+/// Read one framed envelope from `r` by parsing the raw frame and decoding its JSON.
+pub fn read_frame(r: &mut impl Read) -> io::Result<Option<Envelope>> {
+    match read_raw_frame(r)? {
+        Some(frame) => {
+            if frame.kind != FrameKind::Json {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Expected JSON frame, got {:?}", frame.kind),
+                ));
+            }
+            let env = serde_json::from_slice(&frame.data).map_err(io::Error::other)?;
+            Ok(Some(env))
+        }
+        None => Ok(None),
+    }
 }
 
 /// A running one-directional link between a bus and a stream. Drop-safe: [`Bridge::stop`]
@@ -151,5 +237,23 @@ mod tests {
         assert_eq!(back.payload["n"], 5);
         // A second read hits clean EOF.
         assert!(read_frame(&mut cursor).unwrap().is_none());
+    }
+
+    #[test]
+    fn raw_frame_round_trips_through_a_buffer() {
+        let frame = RawFrame {
+            channel: "raw-pty-output".to_string(),
+            kind: FrameKind::Raw,
+            data: vec![0x01, 0x02, 0x03, 0xff, 0x00],
+        };
+        let mut buf = Vec::new();
+        write_raw_frame(&mut buf, &frame).unwrap();
+        let mut cursor = io::Cursor::new(buf);
+        let back = read_raw_frame(&mut cursor).unwrap().unwrap();
+        assert_eq!(back.channel, "raw-pty-output");
+        assert_eq!(back.kind, FrameKind::Raw);
+        assert_eq!(back.data, vec![0x01, 0x02, 0x03, 0xff, 0x00]);
+        // A second read hits clean EOF.
+        assert!(read_raw_frame(&mut cursor).unwrap().is_none());
     }
 }
